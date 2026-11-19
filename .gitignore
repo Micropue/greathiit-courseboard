@@ -1,0 +1,14 @@
+.build/
+build/
+dist/
+*.xcuserstate
+.DS_Store
+
+# Local shortcut reverse-engineering artifacts
+/decoded/
+/leaf.bin
+/leaf.der
+/prologue.bin
+/shortcut.aa
+/sign-pub.pem
+/获取课程表.shortcut
