@@ -5,6 +5,7 @@ public struct Course: Identifiable, Codable, Hashable, Sendable {
     public let teacher: String
     public let building: String
     public let room: String
+    public let place: String?
     public let weekday: Int
     public let period: Int
     public let periodEnd: Int
@@ -16,6 +17,7 @@ public struct Course: Identifiable, Codable, Hashable, Sendable {
         teacher: String = "",
         building: String = "",
         room: String = "",
+        place: String? = nil,
         weekday: Int,
         period: Int,
         periodEnd: Int? = nil,
@@ -26,6 +28,7 @@ public struct Course: Identifiable, Codable, Hashable, Sendable {
         self.teacher = teacher
         self.building = building
         self.room = room
+        self.place = place
         self.weekday = weekday
         self.period = period
         self.periodEnd = max(period, periodEnd ?? period)
@@ -42,6 +45,7 @@ public struct Course: Identifiable, Codable, Hashable, Sendable {
             teacher,
             building,
             room,
+            place ?? "",
             rawTimeAdd
         ].joined(separator: "|")
     }
@@ -62,6 +66,12 @@ public struct Course: Identifiable, Codable, Hashable, Sendable {
     }
 
     public var location: String {
+        let explicitPlace = place?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !explicitPlace.isEmpty {
+            return explicitPlace
+        }
+
         let cleanBuilding = building.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanRoom = room.trimmingCharacters(in: .whitespacesAndNewlines)
 

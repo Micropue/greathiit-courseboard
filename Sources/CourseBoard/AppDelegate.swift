@@ -277,6 +277,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(refreshItem)
         refreshMenuItem = refreshItem
 
+        let exportItem = NSMenuItem(
+            title: "导出日历…",
+            action: #selector(exportCalendarFromMenu),
+            keyEquivalent: "e"
+        )
+        exportItem.keyEquivalentModifierMask = [.command]
+        exportItem.target = self
+        menu.addItem(exportItem)
+
         let settingsItem = NSMenuItem(
             title: "设置…",
             action: #selector(openSettingsFromMenu),
@@ -510,6 +519,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func refreshFromMenu() {
         showPanel()
         model.refresh()
+    }
+
+    @objc private func exportCalendarFromMenu() {
+        showPanel()
+        model.presentICSExport()
     }
 
     @objc private func openSettingsFromMenu() {

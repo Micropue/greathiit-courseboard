@@ -6,6 +6,8 @@ public struct TeachingBlock: Identifiable, Hashable, Sendable {
     public let startTime: String?
     public let endTime: String?
 
+    public static let standardFirstStartMinutes = 8 * 60 + 20
+
     public var id: Int {
         period
     }
@@ -33,6 +35,59 @@ public struct TeachingBlock: Identifiable, Hashable, Sendable {
         TeachingBlock(period: 5, sections: 9...10, startTime: "17:30", endTime: "19:00")
     ]
 
+    public static func schedule(firstStartMinutes: Int) -> [TeachingBlock] {
+        let latestStart = 23 * 60 + 59 - (
+            minutes(from: standard.last?.endTime ?? "19:00")!
+                - standardFirstStartMinutes
+        )
+        let normalizedStart = min(
+            max(firstStartMinutes, 0),
+            latestStart
+        )
+        let offset = normalizedStart - standardFirstStartMinutes
+
+        return standard.map { block in
+            TeachingBlock(
+                period: block.period,
+                sections: block.sections,
+                startTime: block.startTime.flatMap {
+                    minutes(from: $0).map {
+                        timeString(minutes: $0 + offset)
+                    }
+                },
+                endTime: block.endTime.flatMap {
+                    minutes(from: $0).map {
+                        timeString(minutes: $0 + offset)
+                    }
+                }
+            )
+        }
+    }
+
+    public static func minutes(from time: String) -> Int? {
+        let parts = time.split(
+            separator: ":",
+            omittingEmptySubsequences: false
+        )
+        guard parts.count == 2,
+              let hour = Int(parts[0]),
+              let minute = Int(parts[1]),
+              (0..<24).contains(hour),
+              (0..<60).contains(minute) else {
+            return nil
+        }
+        return hour * 60 + minute
+    }
+
+    public static func timeString(minutes: Int) -> String {
+        let normalized = ((minutes % (24 * 60)) + 24 * 60) % (24 * 60)
+        return String(
+            format: "%02d:%02d",
+            normalized / 60,
+            normalized % 60
+        )
+    }
+
     public static func block(for period: Int) -> TeachingBlock {
         if let block = standard.first(where: { $0.period == period }) {
             return block
@@ -47,11 +102,17 @@ public struct TeachingBlock: Identifiable, Hashable, Sendable {
         )
     }
 
-    public static func displayBlocks(for courses: [Course]) -> [TeachingBlock] {
+    public static func displayBlocks(
+        for courses: [Course],
+        using blocks: [TeachingBlock] = standard
+    ) -> [TeachingBlock] {
         let highestPeriod = max(
-            standard.count,
-            courses.map(\.period).max() ?? standard.count
+            blocks.count,
+            courses.map(\.period).max() ?? blocks.count
         )
-        return (1...highestPeriod).map(block(for:))
+        return (1...max(highestPeriod, 1)).map { period in
+            blocks.first(where: { $0.period == period })
+                ?? block(for: period)
+        }
     }
 }

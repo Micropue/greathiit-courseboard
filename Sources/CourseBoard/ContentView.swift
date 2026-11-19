@@ -36,6 +36,27 @@ struct ContentView: View {
         .tint(model.accentColor)
         .environment(\.appAccent, model.accentColor)
         .onExitCommand(perform: closeAction)
+        .sheet(
+            isPresented: $model.isShowingICSExport,
+            onDismiss: model.icsExportSheetDismissed
+        ) {
+            ICSExportSheet(model: model)
+        }
+        .fileExporter(
+            isPresented: $model.isShowingICSFileExporter,
+            document: model.icsDocument,
+            contentType: ICSDocument.icsType,
+            defaultFilename: model.icsExportFilename
+        ) { result in
+            model.handleICSFileExport(result)
+        }
+        .alert("导出日历", isPresented: $model.isShowingICSNotice) {
+            Button("好") {
+                model.isShowingICSNotice = false
+            }
+        } message: {
+            Text(model.icsExportNotice ?? "")
+        }
         .task {
             model.refreshIfNeeded()
         }
@@ -67,6 +88,15 @@ private struct HeaderView: View {
 
             GlassEffectContainer(spacing: 6) {
                 HStack(spacing: 6) {
+                    IconButton(
+                        systemName: "calendar.badge.plus",
+                        help: "导出到日历"
+                    ) {
+                        model.presentICSExport()
+                    }
+                    .disabled(!model.hasJWT)
+                    .opacity(model.hasJWT ? 1 : 0.42)
+
                     IconButton(
                         systemName: model.isLoading
                             ? "arrow.triangle.2.circlepath"
@@ -327,6 +357,340 @@ private struct AuthenticationView: View {
         }
         .padding(24)
     }
+}
+
+private struct ICSExportSheet: View {
+    @ObservedObject var model: AppModel
+
+    @Environment(\.appAccent) private var accent
+
+    var body: some View {
+        VStack(spacing: 0) {
+            sheetHeader
+
+            Divider()
+                .opacity(0.28)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    firstWeekCard
+                    weekDatesCard
+                    teachingTimesCard
+
+                    if let message = model.icsExportError {
+                        Label(
+                            message,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(AppTheme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(18)
+            }
+            .scrollIndicators(.automatic)
+
+            Divider()
+                .opacity(0.28)
+
+            sheetFooter
+        }
+        .frame(width: 500, height: 640)
+        .background {
+            AmbientBackground()
+        }
+        .tint(accent)
+        .interactiveDismissDisabled(model.isExportingICS)
+    }
+
+    private var sheetHeader: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "calendar.badge.plus")
+                .font(.system(size: 16, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(accent)
+                .frame(width: 38, height: 38)
+                .glassEffect(
+                    .regular.tint(accent.opacity(0.09)),
+                    in: Circle()
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("导出到日历")
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                Text("生成 20 周 .ics 课程事件")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            IconButton(
+                systemName: "xmark",
+                help: model.isExportingICS ? "停止并关闭" : "关闭"
+            ) {
+                model.dismissICSExport()
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+
+    private var firstWeekCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("接口不包含具体日期", systemImage: "info.circle.fill")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(accent)
+
+            Text("请确认第 1 周周一的日期。这个日期对应课表中的“星期一”；如有假期，可在下方单独调整某一周，该周及之后的教学周会自动顺延。")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("第 1 周周一日期")
+                        .font(.system(size: 11, weight: .semibold))
+                    DatePicker(
+                        "第 1 周周一日期",
+                        selection: weekDateBinding(1),
+                        displayedComponents: .date
+                    )
+                    .labelsHidden()
+                    .datePickerStyle(.field)
+                    .controlSize(.large)
+                    .frame(width: 158)
+                }
+
+                Spacer(minLength: 8)
+
+                Button("按当前第 \(model.week) 周重新估算") {
+                    model.resetTeachingWeekDatesFromCurrentWeek()
+                }
+                .buttonStyle(.neutralGlass)
+                .disabled(model.isExportingICS)
+            }
+
+            HStack(spacing: 5) {
+                Text("学期范围")
+                    .foregroundStyle(.secondary)
+                Text(firstWeekText)
+                    .monospacedDigit()
+                Text("→")
+                    .foregroundStyle(.tertiary)
+                Text(lastWeekText)
+                    .monospacedDigit()
+            }
+            .font(.system(size: 10.5, weight: .medium))
+        }
+        .padding(15)
+        .glassCard(cornerRadius: 16)
+    }
+
+    private var weekDatesCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("教学周日期")
+                    .font(.system(size: 13.5, weight: .semibold))
+                Text("修改任意一周后，该周及之后所有周会按相同天数顺延。")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 2) {
+                ForEach(2...TeachingCalendar.weekCount, id: \.self) { week in
+                    HStack(spacing: 12) {
+                        Text("第 \(week) 周")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .frame(width: 54, alignment: .leading)
+
+                        DatePicker(
+                            "第 \(week) 周",
+                            selection: weekDateBinding(week),
+                            displayedComponents: .date
+                        )
+                        .labelsHidden()
+                        .datePickerStyle(.field)
+                        .controlSize(.small)
+                        .frame(width: 142)
+
+                        Spacer(minLength: 6)
+
+                        Text(weekRangeText(week))
+                            .font(
+                                .system(
+                                    size: 10,
+                                    weight: .medium,
+                                    design: .monospaced
+                                )
+                            )
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(
+                                week.isMultiple(of: 2)
+                                    ? Color.primary.opacity(0.026)
+                                    : Color.clear
+                            )
+                    }
+                }
+            }
+            .disabled(model.isExportingICS)
+        }
+        .padding(15)
+        .glassCard(cornerRadius: 16)
+    }
+
+    private var teachingTimesCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("上课时间")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text("设置第一节课的开始时间，其余节次会沿用学校原有的课间间隔自动顺延。")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Text("第一节课开始时间")
+                    .font(.system(size: 11.5, weight: .medium))
+
+                Spacer()
+
+                DatePicker(
+                    "第一节课开始时间",
+                    selection: firstCourseStartBinding,
+                    displayedComponents: .hourAndMinute
+                )
+                .labelsHidden()
+                .datePickerStyle(.field)
+                .controlSize(.small)
+                .frame(width: 92)
+                .disabled(model.isExportingICS)
+            }
+
+            Divider()
+                .opacity(0.3)
+
+            ForEach(model.teachingBlocks) { block in
+                HStack {
+                    Text(block.title)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(block.timeRangeText)
+                        .font(
+                            .system(
+                                size: 10.5,
+                                weight: .semibold,
+                                design: .monospaced
+                            )
+                        )
+                }
+            }
+        }
+        .padding(15)
+        .glassCard(cornerRadius: 16)
+    }
+
+    private var firstCourseStartBinding: Binding<Date> {
+        Binding(
+            get: {
+                model.firstCourseStartDate
+            },
+            set: { newDate in
+                model.setFirstCourseStartTime(newDate)
+            }
+        )
+    }
+
+    private var sheetFooter: some View {
+        VStack(spacing: 10) {
+            if model.isExportingICS {
+                VStack(alignment: .leading, spacing: 5) {
+                    ProgressView(value: model.icsExportProgress)
+                        .progressViewStyle(.linear)
+                        .tint(accent)
+                    Text(model.icsExportProgressText ?? "正在导出…")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 10) {
+                Text(
+                    model.icsExportEventCount > 0
+                        ? "已生成 \(model.icsExportEventCount) 个课程事件"
+                        : "保存后双击 .ics 即可导入“日历”，不使用重复规则。"
+                )
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Button(model.isExportingICS ? "停止导出" : "取消") {
+                    model.dismissICSExport()
+                }
+                .buttonStyle(.neutralGlass)
+
+                Button {
+                    model.exportICS()
+                } label: {
+                    Label("导出 .ics", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.glassProminent)
+                .tint(accent)
+                .disabled(model.isExportingICS)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+
+    private func weekDateBinding(_ week: Int) -> Binding<Date> {
+        Binding(
+            get: {
+                model.teachingWeekStartDate(for: week)
+            },
+            set: { newDate in
+                model.shiftTeachingWeekStart(week: week, to: newDate)
+            }
+        )
+    }
+
+    private var firstWeekText: String {
+        Self.shortDateFormatter.string(from: model.teachingWeekStartDate(for: 1))
+    }
+
+    private var lastWeekText: String {
+        Self.shortDateFormatter.string(
+            from: model.teachingWeekEndDate(for: TeachingCalendar.weekCount)
+        )
+    }
+
+    private func weekRangeText(_ week: Int) -> String {
+        let start = Self.shortDateFormatter.string(
+            from: model.teachingWeekStartDate(for: week)
+        )
+        let end = Self.shortDateFormatter.string(
+            from: model.teachingWeekEndDate(for: week)
+        )
+        return "\(start) – \(end)"
+    }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "M月d日"
+        return formatter
+    }()
 }
 
 private struct SettingsView: View {

@@ -24,4 +24,14 @@ final class TeachingBlockTests: XCTestCase {
             [1, 2, 3, 4, 5]
         )
     }
+
+    func testCustomFirstClassTimePreservesBreaks() {
+        let blocks = TeachingBlock.schedule(
+            firstStartMinutes: 8 * 60 + 35
+        )
+
+        XCTAssertEqual(blocks[0].timeRangeText, "08:35–10:05")
+        XCTAssertEqual(blocks[1].timeRangeText, "10:20–11:50")
+        XCTAssertEqual(blocks[4].timeRangeText, "17:45–19:15")
+    }
 }

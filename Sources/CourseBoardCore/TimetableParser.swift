@@ -142,6 +142,10 @@ public enum TimetableParser {
             ) ?? "",
             building: building,
             room: room,
+            place: firstString(
+                in: row,
+                keys: ["place", "location", "classroomPlace"]
+            ),
             weekday: weekday,
             period: period,
             periodEnd: periodEnd,

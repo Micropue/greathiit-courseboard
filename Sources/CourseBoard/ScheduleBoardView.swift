@@ -19,7 +19,10 @@ struct ScheduleBoardView: View {
     private let displayedWeekdays = Array(1...7)
 
     private var displayedBlocks: [TeachingBlock] {
-        TeachingBlock.displayBlocks(for: model.courses)
+        TeachingBlock.displayBlocks(
+            for: model.courses,
+            using: model.teachingBlocks
+        )
     }
 
     var body: some View {

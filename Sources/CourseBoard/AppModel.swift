@@ -9,6 +9,20 @@ enum TeachingCalendar {
     static let weeks = 1...weekCount
 }
 
+private enum ICSExportFlowError: LocalizedError {
+    case missingDates
+    case noCourses
+
+    var errorDescription: String? {
+        switch self {
+        case .missingDates:
+            return "教学周日期尚未准备好，请重新设置第 1 周起始日。"
+        case .noCourses:
+            return "这 20 个教学周里没有读到任何课程，已停止导出。"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private struct CachedSchedule: Codable {
@@ -34,6 +48,19 @@ final class AppModel: ObservableObject {
     @Published var isShowingSettings = false
     @Published var isRecordingHotKey = false
     @Published var courseDetailID: String?
+    @Published private(set) var teachingWeekDates: [Date] = []
+    @Published var isShowingICSExport = false
+    @Published var isShowingICSFileExporter = false
+    @Published private(set) var icsDocument: ICSDocument?
+    @Published private(set) var icsExportFilename = "哈信息课程表.ics"
+    @Published private(set) var icsExportEventCount = 0
+    @Published private(set) var isExportingICS = false
+    @Published private(set) var icsExportProgress = 0.0
+    @Published private(set) var icsExportProgressText: String?
+    @Published private(set) var icsExportError: String?
+    @Published private(set) var icsExportNotice: String?
+    @Published var isShowingICSNotice = false
+    @Published private(set) var firstCourseStartMinutes: Int
     @Published var accentTheme: AppAccentTheme {
         didSet {
             defaults.set(
@@ -46,6 +73,7 @@ final class AppModel: ObservableObject {
     private let api = TimetableAPI()
     private let defaults = UserDefaults.standard
     private var fetchTask: Task<Void, Never>?
+    private var icsExportTask: Task<Void, Never>?
     private var didRequestInitialRefresh = false
     private var lastFetchAttempt: Date?
 
@@ -54,6 +82,15 @@ final class AppModel: ObservableObject {
     var onCancelHotKeyRecording: (() -> Void)?
 
     init() {
+        let storedFirstCourseStart = UserDefaults.standard.object(
+            forKey: "CourseBoard.firstCourseStartMinutes"
+        ) as? Int
+        firstCourseStartMinutes = TeachingBlock.schedule(
+            firstStartMinutes: storedFirstCourseStart
+                ?? TeachingBlock.standardFirstStartMinutes
+        ).first?.startTime.flatMap(TeachingBlock.minutes(from:))
+            ?? TeachingBlock.standardFirstStartMinutes
+
         let storedAccentTheme = UserDefaults.standard.string(
             forKey: "CourseBoard.accentTheme"
         )
@@ -63,7 +100,29 @@ final class AppModel: ObservableObject {
         let storedWeek = UserDefaults.standard.object(
             forKey: "CourseBoard.selectedWeek"
         ) as? Int
-        week = min(max(storedWeek ?? 1, 1), TeachingCalendar.weekCount)
+        let initialWeek = min(
+            max(storedWeek ?? 1, 1),
+            TeachingCalendar.weekCount
+        )
+        week = initialWeek
+
+        let savedWeekDates = UserDefaults.standard.array(
+            forKey: "CourseBoard.teachingWeekDates"
+        ) as? [Double]
+        if let savedWeekDates,
+           savedWeekDates.count == TeachingCalendar.weekCount {
+            teachingWeekDates = savedWeekDates.map {
+                Self.teachingCalendar.startOfDay(
+                    for: Date(timeIntervalSince1970: $0)
+                )
+            }
+        } else {
+            teachingWeekDates = Self.continuousWeekDates(
+                startingAt: Self.estimatedFirstWeekStart(
+                    currentWeek: initialWeek
+                )
+            )
+        }
 
         hasJWT = KeychainStore.readToken()?.isEmpty == false
         refreshLaunchAtLoginState()
@@ -72,6 +131,7 @@ final class AppModel: ObservableObject {
 
     deinit {
         fetchTask?.cancel()
+        icsExportTask?.cancel()
     }
 
     var todayWeekday: Int {
@@ -81,6 +141,27 @@ final class AppModel: ObservableObject {
 
     var accentColor: Color {
         accentTheme.color
+    }
+
+    var teachingBlocks: [TeachingBlock] {
+        TeachingBlock.schedule(
+            firstStartMinutes: firstCourseStartMinutes
+        )
+    }
+
+    var firstCourseStartDate: Date {
+        Self.teachingCalendar.date(
+            bySettingHour: firstCourseStartMinutes / 60,
+            minute: firstCourseStartMinutes % 60,
+            second: 0,
+            of: Date()
+        ) ?? Date()
+    }
+
+    var firstCourseStartText: String {
+        TeachingBlock.timeString(
+            minutes: firstCourseStartMinutes
+        )
     }
 
     func courses(on weekday: Int) -> [Course] {
@@ -245,6 +326,226 @@ final class AppModel: ObservableObject {
         errorRequiresJWT = false
     }
 
+    func presentICSExport() {
+        guard hasJWT else {
+            isShowingSettings = true
+            return
+        }
+        if teachingWeekDates.count != TeachingCalendar.weekCount {
+            resetTeachingWeekDatesFromCurrentWeek()
+        }
+
+        icsExportError = nil
+        icsExportProgress = 0
+        icsExportProgressText = nil
+        icsExportEventCount = 0
+        isShowingICSExport = true
+    }
+
+    func teachingWeekStartDate(for week: Int) -> Date {
+        let index = min(
+            max(week - 1, 0),
+            teachingWeekDates.count - 1
+        )
+        guard teachingWeekDates.indices.contains(index) else {
+            return Self.estimatedFirstWeekStart(currentWeek: self.week)
+        }
+        return teachingWeekDates[index]
+    }
+
+    func teachingWeekEndDate(for week: Int) -> Date {
+        Self.teachingCalendar.date(
+            byAdding: .day,
+            value: 6,
+            to: teachingWeekStartDate(for: week)
+        ) ?? teachingWeekStartDate(for: week)
+    }
+
+    func shiftTeachingWeekStart(week: Int, to date: Date) {
+        let index = week - 1
+        guard teachingWeekDates.indices.contains(index) else {
+            return
+        }
+
+        let normalizedDate = Self.teachingCalendar.startOfDay(for: date)
+        let dayDelta = Self.teachingCalendar.dateComponents(
+            [.day],
+            from: teachingWeekDates[index],
+            to: normalizedDate
+        ).day ?? 0
+        guard dayDelta != 0 else {
+            return
+        }
+
+        for shiftedIndex in index..<teachingWeekDates.count {
+            guard let shiftedDate = Self.teachingCalendar.date(
+                byAdding: .day,
+                value: dayDelta,
+                to: teachingWeekDates[shiftedIndex]
+            ) else {
+                continue
+            }
+            teachingWeekDates[shiftedIndex] = shiftedDate
+        }
+        persistTeachingWeekDates()
+    }
+
+    func resetTeachingWeekDatesFromCurrentWeek() {
+        teachingWeekDates = Self.continuousWeekDates(
+            startingAt: Self.estimatedFirstWeekStart(currentWeek: week)
+        )
+        persistTeachingWeekDates()
+    }
+
+    func setFirstCourseStartTime(_ date: Date) {
+        let components = Self.teachingCalendar.dateComponents(
+            [.hour, .minute],
+            from: date
+        )
+        guard let hour = components.hour,
+              let minute = components.minute else {
+            return
+        }
+        let normalizedStart = TeachingBlock.schedule(
+            firstStartMinutes: hour * 60 + minute
+        ).first?.startTime.flatMap(TeachingBlock.minutes(from:))
+            ?? TeachingBlock.standardFirstStartMinutes
+        firstCourseStartMinutes = normalizedStart
+        defaults.set(
+            normalizedStart,
+            forKey: "CourseBoard.firstCourseStartMinutes"
+        )
+    }
+
+    func dismissICSExport() {
+        icsExportTask?.cancel()
+        icsExportTask = nil
+        isExportingICS = false
+        icsExportProgressText = nil
+        isShowingICSExport = false
+    }
+
+    func icsExportSheetDismissed() {
+        guard isExportingICS else {
+            return
+        }
+        dismissICSExport()
+    }
+
+    func exportICS() {
+        guard !isExportingICS else {
+            return
+        }
+        guard teachingWeekDates.count == TeachingCalendar.weekCount else {
+            icsExportError = ICSExportFlowError.missingDates.localizedDescription
+            return
+        }
+        guard let token = KeychainStore.readToken(),
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            hasJWT = false
+            icsExportError = "JWT 已失效，请先更新访问令牌。"
+            return
+        }
+
+        isExportingICS = true
+        icsExportError = nil
+        icsExportEventCount = 0
+        icsExportProgress = 0
+        icsExportProgressText = "正在准备读取教学周…"
+
+        let weekDates = teachingWeekDates
+        icsExportTask?.cancel()
+        icsExportTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                var exportWeeks: [ICSExportWeek] = []
+                for week in TeachingCalendar.weeks {
+                    try Task.checkCancellation()
+                    icsExportProgressText = "正在读取第 \(week)/\(TeachingCalendar.weekCount) 周…"
+
+                    let courses = try await api.fetchCourses(
+                        week: week,
+                        jwt: token
+                    )
+                    try Task.checkCancellation()
+
+                    if !courses.isEmpty {
+                        exportWeeks.append(
+                            ICSExportWeek(
+                                week: week,
+                                startDate: weekDates[week - 1],
+                                courses: courses
+                            )
+                        )
+                    }
+                    icsExportProgress =
+                        Double(week) / Double(TeachingCalendar.weekCount)
+                }
+
+                let eventCount = exportWeeks.reduce(0) {
+                    $0 + $1.courses.count
+                }
+                guard eventCount > 0 else {
+                    throw ICSExportFlowError.noCourses
+                }
+
+                icsExportProgressText = "正在生成日历文件…"
+                let calendarText = try ICSWriter.makeCalendar(
+                    weeks: exportWeeks,
+                    blocks: teachingBlocks
+                )
+
+                icsDocument = ICSDocument(text: calendarText)
+                icsExportEventCount = eventCount
+                icsExportFilename = Self.exportFilename(
+                    firstWeekDate: weekDates[0]
+                )
+                isExportingICS = false
+                icsExportProgressText = nil
+                isShowingICSExport = false
+
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                guard !Task.isCancelled else {
+                    return
+                }
+                isShowingICSFileExporter = true
+            } catch is CancellationError {
+                isExportingICS = false
+                icsExportProgressText = nil
+            } catch {
+                if isCancellation(error) {
+                    isExportingICS = false
+                    icsExportProgressText = nil
+                    return
+                }
+                isExportingICS = false
+                icsExportProgressText = nil
+                icsExportError = friendlyMessage(for: error)
+            }
+        }
+    }
+
+    func handleICSFileExport(_ result: Result<URL, Error>) {
+        isShowingICSFileExporter = false
+        icsDocument = nil
+
+        switch result {
+        case .success(let url):
+            showICSNotice(
+                "已导出 \(icsExportEventCount) 个课程事件到 \(url.lastPathComponent)。"
+            )
+        case .failure(let error):
+            if let cocoaError = error as? CocoaError,
+               cocoaError.code == .userCancelled {
+                return
+            }
+            showICSNotice("保存日历失败：\(error.localizedDescription)")
+        }
+    }
+
     func setRegisteredHotKey(
         _ spec: GlobalHotKey.Spec,
         notice: String? = nil
@@ -352,6 +653,15 @@ final class AppModel: ObservableObject {
         return error.localizedDescription
     }
 
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain
+            && nsError.code == NSURLErrorCancelled
+    }
+
     private var cacheURL: URL? {
         guard let baseURL = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -403,5 +713,63 @@ final class AppModel: ObservableObject {
             return
         }
         try? FileManager.default.removeItem(at: cacheURL)
+    }
+
+    private static var teachingCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "zh_CN")
+        calendar.timeZone = TimeZone(identifier: ICSWriter.timeZoneIdentifier)!
+        calendar.firstWeekday = 2
+        return calendar
+    }
+
+    private static func estimatedFirstWeekStart(
+        currentWeek: Int,
+        referenceDate: Date = Date()
+    ) -> Date {
+        let day = teachingCalendar.startOfDay(for: referenceDate)
+        let weekday = ((teachingCalendar.component(.weekday, from: day) + 5) % 7) + 1
+        let monday = teachingCalendar.date(
+            byAdding: .day,
+            value: 1 - weekday,
+            to: day
+        ) ?? day
+        return teachingCalendar.date(
+            byAdding: .day,
+            value: -(max(currentWeek, 1) - 1) * 7,
+            to: monday
+        ) ?? monday
+    }
+
+    private static func continuousWeekDates(startingAt firstWeekStart: Date) -> [Date] {
+        let start = teachingCalendar.startOfDay(for: firstWeekStart)
+        return (0..<TeachingCalendar.weekCount).compactMap {
+            teachingCalendar.date(
+                byAdding: .day,
+                value: $0 * 7,
+                to: start
+            )
+        }
+    }
+
+    private static func exportFilename(firstWeekDate: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = teachingCalendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = teachingCalendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return "哈信息课程表-\(formatter.string(from: firstWeekDate)).ics"
+    }
+
+    private func persistTeachingWeekDates() {
+        defaults.set(
+            teachingWeekDates.map(\.timeIntervalSince1970),
+            forKey: "CourseBoard.teachingWeekDates"
+        )
+    }
+
+    private func showICSNotice(_ message: String) {
+        icsExportNotice = message
+        isShowingICSNotice = true
     }
 }
