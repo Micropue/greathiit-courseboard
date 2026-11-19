@@ -60,7 +60,39 @@ final class AppModel: ObservableObject {
     @Published private(set) var icsExportError: String?
     @Published private(set) var icsExportNotice: String?
     @Published var isShowingICSNotice = false
+    @Published var isShowingJSONFileExporter = false
+    @Published private(set) var jsonDocument: JSONDocument?
+    @Published private(set) var jsonExportFilename = "哈信息课程表.json"
+    @Published private(set) var jsonExportCourseCount = 0
+    @Published private(set) var isExportingJSON = false
+    @Published private(set) var jsonExportProgress = 0.0
+    @Published private(set) var jsonExportNotice: String?
+    @Published var isShowingJSONNotice = false
     @Published private(set) var firstCourseStartMinutes: Int
+    @Published var icsReminderPreset: ICSReminderPreset = .none {
+        didSet {
+            defaults.set(
+                icsReminderPreset.rawValue,
+                forKey: "CourseBoard.icsReminderPreset"
+            )
+        }
+    }
+    @Published var icsReminderCustomValue: Int = 15 {
+        didSet {
+            defaults.set(
+                icsReminderCustomValue,
+                forKey: "CourseBoard.icsReminderCustomValue"
+            )
+        }
+    }
+    @Published var icsReminderCustomUnit: ICSReminderUnit = .minutes {
+        didSet {
+            defaults.set(
+                icsReminderCustomUnit.rawValue,
+                forKey: "CourseBoard.icsReminderCustomUnit"
+            )
+        }
+    }
     @Published var accentTheme: AppAccentTheme {
         didSet {
             defaults.set(
@@ -74,6 +106,7 @@ final class AppModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private var fetchTask: Task<Void, Never>?
     private var icsExportTask: Task<Void, Never>?
+    private var jsonExportTask: Task<Void, Never>?
     private var didRequestInitialRefresh = false
     private var lastFetchAttempt: Date?
 
@@ -90,6 +123,19 @@ final class AppModel: ObservableObject {
                 ?? TeachingBlock.standardFirstStartMinutes
         ).first?.startTime.flatMap(TeachingBlock.minutes(from:))
             ?? TeachingBlock.standardFirstStartMinutes
+
+        icsReminderPreset = UserDefaults.standard.string(
+            forKey: "CourseBoard.icsReminderPreset"
+        ).flatMap(ICSReminderPreset.init(rawValue:)) ?? .none
+        icsReminderCustomValue = max(
+            1,
+            (UserDefaults.standard.object(
+                forKey: "CourseBoard.icsReminderCustomValue"
+            ) as? Int) ?? 15
+        )
+        icsReminderCustomUnit = UserDefaults.standard.string(
+            forKey: "CourseBoard.icsReminderCustomUnit"
+        ).flatMap(ICSReminderUnit.init(rawValue:)) ?? .minutes
 
         let storedAccentTheme = UserDefaults.standard.string(
             forKey: "CourseBoard.accentTheme"
@@ -132,6 +178,7 @@ final class AppModel: ObservableObject {
     deinit {
         fetchTask?.cancel()
         icsExportTask?.cancel()
+        jsonExportTask?.cancel()
     }
 
     var todayWeekday: Int {
@@ -162,6 +209,26 @@ final class AppModel: ObservableObject {
         TeachingBlock.timeString(
             minutes: firstCourseStartMinutes
         )
+    }
+
+    var icsReminder: ICSReminder? {
+        icsReminderPreset.reminder(
+            customValue: icsReminderCustomValue,
+            customUnit: icsReminderCustomUnit
+        )
+    }
+
+    var icsReminderValidationMessage: String? {
+        guard icsReminderPreset == .custom else {
+            return nil
+        }
+        guard icsReminderCustomValue > 0 else {
+            return "自定义提醒时间必须大于 0。"
+        }
+        guard icsReminder != nil else {
+            return "自定义提醒时间过大，请换一个较小的值。"
+        }
+        return nil
     }
 
     func courses(on weekday: Int) -> [Course] {
@@ -312,6 +379,7 @@ final class AppModel: ObservableObject {
     func clearJWT() {
         _ = KeychainStore.deleteToken()
         fetchTask?.cancel()
+        cancelJSONExport()
         hasJWT = false
         jwtDraft = ""
         courses = []
@@ -446,6 +514,10 @@ final class AppModel: ObservableObject {
             icsExportError = "JWT 已失效，请先更新访问令牌。"
             return
         }
+        if let message = icsReminderValidationMessage {
+            icsExportError = message
+            return
+        }
 
         isExportingICS = true
         icsExportError = nil
@@ -454,6 +526,7 @@ final class AppModel: ObservableObject {
         icsExportProgressText = "正在准备读取教学周…"
 
         let weekDates = teachingWeekDates
+        let reminder = icsReminder
         icsExportTask?.cancel()
         icsExportTask = Task { [weak self] in
             guard let self else {
@@ -495,7 +568,8 @@ final class AppModel: ObservableObject {
                 icsExportProgressText = "正在生成日历文件…"
                 let calendarText = try ICSWriter.makeCalendar(
                     weeks: exportWeeks,
-                    blocks: teachingBlocks
+                    blocks: teachingBlocks,
+                    reminder: reminder
                 )
 
                 icsDocument = ICSDocument(text: calendarText)
@@ -543,6 +617,93 @@ final class AppModel: ObservableObject {
                 return
             }
             showICSNotice("保存日历失败：\(error.localizedDescription)")
+        }
+    }
+
+    func exportJSON() {
+        guard !isExportingJSON, !isExportingICS else {
+            return
+        }
+        guard let token = KeychainStore.readToken(),
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            hasJWT = false
+            showJSONNotice("JWT 已失效，请先更新访问令牌。")
+            return
+        }
+
+        isExportingJSON = true
+        jsonExportProgress = 0
+        jsonExportCourseCount = 0
+        jsonDocument = nil
+
+        jsonExportTask?.cancel()
+        jsonExportTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                var allCourses: [Course] = []
+                for week in TeachingCalendar.weeks {
+                    try Task.checkCancellation()
+                    let fetchedCourses = try await api.fetchCourses(
+                        week: week,
+                        jwt: token
+                    )
+                    try Task.checkCancellation()
+                    allCourses.append(contentsOf: fetchedCourses)
+                    jsonExportProgress =
+                        Double(week) / Double(TeachingCalendar.weekCount)
+                }
+
+                let result = try JSONExporter.makeExport(
+                    from: allCourses
+                )
+                jsonDocument = JSONDocument(text: result.text)
+                jsonExportCourseCount = result.courseCount
+                isExportingJSON = false
+
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                guard !Task.isCancelled else {
+                    return
+                }
+                isShowingJSONFileExporter = true
+            } catch is CancellationError {
+                isExportingJSON = false
+            } catch {
+                if isCancellation(error) {
+                    isExportingJSON = false
+                    return
+                }
+                isExportingJSON = false
+                showJSONNotice("JSON 导出失败：\(friendlyMessage(for: error))")
+            }
+        }
+    }
+
+    func cancelJSONExport() {
+        jsonExportTask?.cancel()
+        jsonExportTask = nil
+        isExportingJSON = false
+        jsonExportProgress = 0
+        jsonDocument = nil
+    }
+
+    func handleJSONFileExport(_ result: Result<URL, Error>) {
+        isShowingJSONFileExporter = false
+        jsonDocument = nil
+
+        switch result {
+        case .success(let url):
+            showJSONNotice(
+                "已导出 \(jsonExportCourseCount) 门课程到 \(url.lastPathComponent)。"
+            )
+        case .failure(let error):
+            if let cocoaError = error as? CocoaError,
+               cocoaError.code == .userCancelled {
+                return
+            }
+            showJSONNotice("保存 JSON 失败：\(error.localizedDescription)")
         }
     }
 
@@ -771,5 +932,10 @@ final class AppModel: ObservableObject {
     private func showICSNotice(_ message: String) {
         icsExportNotice = message
         isShowingICSNotice = true
+    }
+
+    private func showJSONNotice(_ message: String) {
+        jsonExportNotice = message
+        isShowingJSONNotice = true
     }
 }

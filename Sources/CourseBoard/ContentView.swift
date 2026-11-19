@@ -11,6 +11,24 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 HeaderView(model: model)
+                    .fileExporter(
+                        isPresented: $model.isShowingJSONFileExporter,
+                        document: model.jsonDocument,
+                        contentType: .json,
+                        defaultFilename: model.jsonExportFilename
+                    ) { result in
+                        model.handleJSONFileExport(result)
+                    }
+                    .alert(
+                        "导出 JSON",
+                        isPresented: $model.isShowingJSONNotice
+                    ) {
+                        Button("好") {
+                            model.isShowingJSONNotice = false
+                        }
+                    } message: {
+                        Text(model.jsonExportNotice ?? "")
+                    }
 
                 Divider()
                     .opacity(0.35)
@@ -89,13 +107,38 @@ private struct HeaderView: View {
             GlassEffectContainer(spacing: 6) {
                 HStack(spacing: 6) {
                     IconButton(
+                        systemName: model.isExportingJSON
+                            ? "xmark"
+                            : "curlybraces",
+                        help: model.isExportingJSON
+                            ? "取消导出 JSON"
+                            : "导出 JSON",
+                        isActive: model.isExportingJSON
+                    ) {
+                        if model.isExportingJSON {
+                            model.cancelJSONExport()
+                        } else {
+                            model.exportJSON()
+                        }
+                    }
+                    .disabled(
+                        (!model.hasJWT && !model.isExportingJSON)
+                            || model.isExportingICS
+                    )
+                    .opacity(
+                        model.hasJWT && !model.isExportingICS ? 1 : 0.42
+                    )
+
+                    IconButton(
                         systemName: "calendar.badge.plus",
                         help: "导出到日历"
                     ) {
                         model.presentICSExport()
                     }
-                    .disabled(!model.hasJWT)
-                    .opacity(model.hasJWT ? 1 : 0.42)
+                    .disabled(!model.hasJWT || model.isExportingJSON)
+                    .opacity(
+                        model.hasJWT && !model.isExportingJSON ? 1 : 0.42
+                    )
 
                     IconButton(
                         systemName: model.isLoading
@@ -376,6 +419,7 @@ private struct ICSExportSheet: View {
                     firstWeekCard
                     weekDatesCard
                     teachingTimesCard
+                    reminderCard
 
                     if let message = model.icsExportError {
                         Label(
@@ -598,6 +642,93 @@ private struct ICSExportSheet: View {
         .glassCard(cornerRadius: 16)
     }
 
+    private var reminderCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("提前提醒")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text("提醒会随每个课程事件写入 .ics 文件。默认不添加提醒。")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Label("课程开始前", systemImage: "bell.badge")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Picker(
+                    "提前提醒",
+                    selection: $model.icsReminderPreset
+                ) {
+                    ForEach(ICSReminderPreset.allCases) { preset in
+                        Text(preset.title)
+                            .tag(preset)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.regular)
+                .frame(width: 126)
+                .disabled(model.isExportingICS)
+            }
+
+            if model.icsReminderPreset == .custom {
+                Divider()
+                    .opacity(0.3)
+
+                HStack(spacing: 8) {
+                    Text("提前")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    TextField(
+                        "提醒时间",
+                        value: $model.icsReminderCustomValue,
+                        format: .number
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 72)
+
+                    Picker(
+                        "单位",
+                        selection: $model.icsReminderCustomUnit
+                    ) {
+                        ForEach(ICSReminderUnit.allCases) { unit in
+                            Text(unit.title)
+                                .tag(unit)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 72)
+
+                    Text("提醒")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+                }
+                .disabled(model.isExportingICS)
+
+                if let message = model.icsReminderValidationMessage {
+                    Label(
+                        message,
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(AppTheme.danger)
+                }
+            }
+        }
+        .padding(15)
+        .glassCard(cornerRadius: 16)
+    }
+
     private var firstCourseStartBinding: Binding<Date> {
         Binding(
             get: {
@@ -647,7 +778,10 @@ private struct ICSExportSheet: View {
                 }
                 .buttonStyle(.glassProminent)
                 .tint(accent)
-                .disabled(model.isExportingICS)
+                .disabled(
+                    model.isExportingICS
+                        || model.icsReminderValidationMessage != nil
+                )
             }
         }
         .padding(.horizontal, 18)
@@ -1198,10 +1332,19 @@ private struct StatusBarView: View {
                     : "keyboard.badge.exclamationmark"
             )
 
-            Text("·")
-                .opacity(0.35)
+            if model.isExportingJSON {
+                Text("·")
+                    .opacity(0.35)
 
-            Text(syncText)
+                Text(
+                    "导出 JSON \(Int(model.jsonExportProgress * 100))%"
+                )
+            } else {
+                Text("·")
+                    .opacity(0.35)
+
+                Text(syncText)
+            }
 
             Spacer()
 

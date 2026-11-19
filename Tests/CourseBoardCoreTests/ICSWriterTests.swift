@@ -165,6 +165,71 @@ final class ICSWriterTests: XCTestCase {
         XCTAssertTrue(calendar.contains("DTEND:20260907T020500Z"))
     }
 
+    func testOmitsAlarmByDefault() throws {
+        let course = Course(name: "计算机网络", weekday: 1, period: 1)
+        let calendar = try ICSWriter.makeCalendar(
+            weeks: [
+                ICSExportWeek(
+                    week: 1,
+                    startDate: date(year: 2026, month: 9, day: 7),
+                    courses: [course]
+                )
+            ]
+        )
+
+        XCTAssertFalse(calendar.contains("BEGIN:VALARM"))
+        XCTAssertFalse(calendar.contains("TRIGGER:"))
+    }
+
+    func testAddsReminderToEveryEvent() throws {
+        let course = Course(name: "计算机网络", weekday: 1, period: 1)
+        let calendar = try ICSWriter.makeCalendar(
+            weeks: [
+                ICSExportWeek(
+                    week: 1,
+                    startDate: date(year: 2026, month: 9, day: 7),
+                    courses: [course, course]
+                )
+            ],
+            reminder: ICSReminder(minutesBeforeStart: 15)
+        )
+
+        XCTAssertEqual(
+            calendar.components(separatedBy: "BEGIN:VALARM").count - 1,
+            2
+        )
+        XCTAssertTrue(calendar.contains("ACTION:DISPLAY"))
+        XCTAssertTrue(calendar.contains("DESCRIPTION:课程提醒：计算机网络"))
+        XCTAssertTrue(calendar.contains("TRIGGER:-PT15M"))
+        XCTAssertTrue(calendar.contains("END:VALARM\r\nEND:VEVENT"))
+    }
+
+    func testFormatsReminderDurations() throws {
+        let course = Course(name: "算法分析", weekday: 2, period: 2)
+        let week = ICSExportWeek(
+            week: 1,
+            startDate: date(year: 2026, month: 9, day: 7),
+            courses: [course]
+        )
+
+        let atStart = try ICSWriter.makeCalendar(
+            weeks: [week],
+            reminder: ICSReminder(minutesBeforeStart: 0)
+        )
+        let twoHours = try ICSWriter.makeCalendar(
+            weeks: [week],
+            reminder: ICSReminder(minutesBeforeStart: 120)
+        )
+        let twoDays = try ICSWriter.makeCalendar(
+            weeks: [week],
+            reminder: ICSReminder(minutesBeforeStart: 2 * 24 * 60)
+        )
+
+        XCTAssertTrue(atStart.contains("TRIGGER:PT0S"))
+        XCTAssertTrue(twoHours.contains("TRIGGER:-PT2H"))
+        XCTAssertTrue(twoDays.contains("TRIGGER:-P2D"))
+    }
+
     func testRejectsUnknownPeriod() {
         let course = Course(name: "未知课程", weekday: 1, period: 9)
         let week = ICSExportWeek(

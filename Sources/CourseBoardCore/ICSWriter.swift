@@ -12,6 +12,30 @@ public struct ICSExportWeek: Equatable, Sendable {
     }
 }
 
+public struct ICSReminder: Equatable, Sendable {
+    public let minutesBeforeStart: Int
+
+    public init(minutesBeforeStart: Int) {
+        self.minutesBeforeStart = max(0, minutesBeforeStart)
+    }
+
+    var triggerValue: String {
+        guard minutesBeforeStart > 0 else {
+            return "PT0S"
+        }
+
+        let minutesPerHour = 60
+        let minutesPerDay = 24 * minutesPerHour
+        if minutesBeforeStart.isMultiple(of: minutesPerDay) {
+            return "-P\(minutesBeforeStart / minutesPerDay)D"
+        }
+        if minutesBeforeStart.isMultiple(of: minutesPerHour) {
+            return "-PT\(minutesBeforeStart / minutesPerHour)H"
+        }
+        return "-PT\(minutesBeforeStart)M"
+    }
+}
+
 public enum ICSWriterError: LocalizedError, Equatable {
     case invalidWeek(Int)
     case invalidWeekday(week: Int, weekday: Int)
@@ -38,12 +62,14 @@ public enum ICSWriter {
     public static func makeCalendar(
         weeks: [ICSExportWeek],
         blocks: [TeachingBlock] = TeachingBlock.standard,
+        reminder: ICSReminder? = nil,
         generatedAt: Date = Date()
     ) throws -> String {
         let calendar = teachingCalendar
         let events = try eventLines(
             weeks: weeks,
             blocks: blocks,
+            reminder: reminder,
             generatedAt: generatedAt,
             calendar: calendar
         )
@@ -68,6 +94,7 @@ public enum ICSWriter {
     private static func eventLines(
         weeks: [ICSExportWeek],
         blocks: [TeachingBlock],
+        reminder: ICSReminder?,
         generatedAt: Date,
         calendar: Calendar
     ) throws -> [String] {
@@ -160,6 +187,15 @@ public enum ICSWriter {
                 lines.append("DESCRIPTION:\(escape(description))")
                 lines.append("STATUS:CONFIRMED")
                 lines.append("TRANSP:OPAQUE")
+                if let reminder {
+                    lines.append("BEGIN:VALARM")
+                    lines.append("ACTION:DISPLAY")
+                    lines.append(
+                        "DESCRIPTION:\(escape("课程提醒：\(course.name)"))"
+                    )
+                    lines.append("TRIGGER:\(reminder.triggerValue)")
+                    lines.append("END:VALARM")
+                }
                 lines.append("END:VEVENT")
             }
         }
